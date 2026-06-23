@@ -1,6 +1,6 @@
 # Smart Device MQTT Bridge
 
-REST API ↔ MQTT Bridge for controlling smart devices.
+REST API ↔ MQTT Bridge for controlling smart devices..
 
 ## Quick Start (Local Testing)
 
