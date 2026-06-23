@@ -1,0 +1,57 @@
+steps:
+  # Step 0: Capture build timestamp into /workspace/build_time.txt
+  - name: "bash"
+    script: "date -u +%Y-%m-%dT%H:%M:%SZ > /workspace/build_time.txt"
+
+  # Step 1: Build Docker image (version injected via ldflags for /health and /version endpoints)
+  - name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        BUILD_TIME=$(cat /workspace/build_time.txt)
+        docker build \
+          --build-arg SHORT_SHA=$SHORT_SHA \
+          --build-arg BUILD_TIME=$$BUILD_TIME \
+          -t gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:$COMMIT_SHA \
+          --gcs-log-dir=gs://YOUR_CUSTOM_LOG_BUCKET_NAME/logs
+          .
+
+  # Step 2: Push both tags to Container Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:$COMMIT_SHA"
+
+  # Step 3: Deploy to Cloud Run
+  # Secrets are sourced from Google Secret Manager — only the secret *name* is listed here,
+  # never the value. Syntax: ENV_VAR_NAME=SECRET_MANAGER_SECRET_NAME:version
+  # Non-secret config (URLs, intervals) are set once via:
+  #   gcloud run services update tauchoapis --region asia-northeast1 --update-env-vars KEY=VALUE
+  # and are intentionally not listed here so they survive deploys without being reset.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: "gcloud"
+    args:
+      - "run"
+      - "deploy"
+      - "UnicornDeviceBroker"
+      - "--image"
+      - "gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:$COMMIT_SHA"
+      - "--region"
+      - "asia-northeast1"
+      - "--platform"
+      - "managed"
+      - "--memory"
+      - "512Mi"
+      - "--min-instances"
+      - "1"
+      - "--allow-unauthenticated"
+
+# Images to push to Container Registry
+images:
+  - "gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:$COMMIT_SHA"
+
+# Substitutions (define these in Cloud Build trigger settings if needed)
+substitutions:
+  _SERVICE: UnicornDeviceBroker
+  _REGION: asia-northeast1
