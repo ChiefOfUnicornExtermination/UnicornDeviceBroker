@@ -14,7 +14,7 @@ steps:
           --build-arg SHORT_SHA=$SHORT_SHA \
           --build-arg BUILD_TIME=$$BUILD_TIME \
           -t gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:$COMMIT_SHA \
-          --gcs-log-dir=gs://YOUR_CUSTOM_LOG_BUCKET_NAME/logs
+          --gcs-log-dir=gs://BrokerBridgeLogBucket/logs
           .
 
   # Step 2: Push both tags to Container Registry
