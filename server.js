@@ -11,9 +11,10 @@ app.use(cors());
 // MQTT Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-// For local testing, use: mqtt://localhost:1883
+// For local testing, use: 127.0.0.1:1883
 // For Google Cloud, we'll set up a managed broker (see DEPLOYMENT.md)
-const MQTT_BROKER = process.env.MQTT_BROKER || 'mqtt://localhost:1883';
+const MQTT_HOST = process.env.MQTT_HOST || '127.0.0.1';
+const MQTT_PORT = process.env.MQTT_PORT || 1883;
 const MQTT_CLIENT_ID = 'rest-bridge-' + Math.random().toString(16).substr(2, 8);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,8 +22,8 @@ const MQTT_CLIENT_ID = 'rest-bridge-' + Math.random().toString(16).substr(2, 8);
 // ─────────────────────────────────────────────────────────────────────────────
 
 const deviceState = {
-  light: 'off',
-  motor: 'stopped'
+ light: 'off',
+ motor: 'stopped'
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -30,13 +31,16 @@ const deviceState = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const mqttOptions = {
-  clientId: MQTT_CLIENT_ID,
-  clean: true,
-  connectTimeout: 4000,
-  reconnectPeriod: 1000,
+ host: MQTT_HOST,
+ port: MQTT_PORT,
+ clientId: MQTT_CLIENT_ID,
+ clean: true,
+ connectTimeout: 4000,
+ reconnectPeriod: 1000,
+ family: 4,  // Force IPv4
 };
 
-const client = mqtt.connect(MQTT_BROKER, mqttOptions);
+const client = mqtt.connect(mqttOptions);
 
 client.on('connect', () => {
   console.log('✓ Connected to MQTT broker');
@@ -76,7 +80,7 @@ client.on('disconnect', () => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', broker: MQTT_BROKER });
+  res.json({ status: 'ok', broker: `${MQTT_HOST}:${MQTT_PORT}` });
 });
 
 // Get all device status
@@ -159,7 +163,7 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n--- Smart Device REST-MQTT Bridge ---`);
   console.log(`🚀 REST Server listening on port ${PORT}`);
-  console.log(`📡 MQTT Broker: ${MQTT_BROKER}`);
+  console.log(`📡 MQTT Broker: ${MQTT_HOST}:${MQTT_PORT}`);
   console.log(`\nAPI Endpoints:`);
   console.log(`  POST   http://localhost:${PORT}/light/on`);
   console.log(`  POST   http://localhost:${PORT}/light/off`);
