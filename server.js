@@ -41,7 +41,7 @@ const mqttOptions = {
  family: 4,  // Force IPv4
 };
 
-const client = mqtt.connect(mqttOptions);
+const client = mqtt.connect(MQTT_HOST, mqttOptions);
 
 client.on('connect', () => {
   console.log('✓ Connected to MQTT broker');
