@@ -31,6 +31,7 @@ const deviceState = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const mqttOptions = {
+ protocol: 'mqtt',  // Add this line
  host: MQTT_HOST,
  port: MQTT_PORT,
  clientId: MQTT_CLIENT_ID,
