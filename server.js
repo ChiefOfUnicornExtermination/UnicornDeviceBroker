@@ -1,7 +1,7 @@
 const express = require('express');
 const mqtt = require('mqtt');
 const cors = require('cors');
-const mysql = require('mysql2/promise');
+const mariadb = require('mariadb');
 require('dotenv').config();
 
 const app = express();
@@ -12,7 +12,7 @@ app.use(cors());
 // Database Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-const dbPool = mysql.createPool({
+const dbPool = mariadb.createPool({
  host: process.env.DB_HOST || 'localhost',
  user: process.env.DB_USER || 'smartdevice',
  password: process.env.DB_PASSWORD || 'password',
