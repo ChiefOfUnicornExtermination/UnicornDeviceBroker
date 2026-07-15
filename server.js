@@ -19,8 +19,28 @@ const dbPool = mariadb.createPool({
  database: 'smartdevice',
  waitForConnections: true,
  connectionLimit: 10,
- queueLimit: 0
+ queueLimit: 0,
+ enableKeepAlive: true,
+ idleTimeout: 60000
 });
+
+// Test database connection at startup
+async function testDatabase() {
+ try {
+   const conn = await dbPool.getConnection();
+   await conn.query('SELECT 1');
+   conn.release();
+   console.log('✓ Database connected successfully');
+ } catch (err) {
+   console.error('✗ DATABASE CONNECTION FAILED:', err.message);
+   console.error('  DB_HOST=' + (process.env.DB_HOST || 'localhost'));
+   console.error('  DB_USER=' + (process.env.DB_USER || 'smartdevice'));
+   console.error('  Ensure MariaDB/MySQL is running and accessible');
+   // Don't exit—let server try to start anyway, healthcheck will show status
+ }
+}
+
+setTimeout(() => testDatabase(), 1000);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MQTT Configuration
@@ -157,13 +177,58 @@ mqttClient.on('disconnect', () => {
 // REST API Endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Health check
-app.get('/health', (req, res) => {
- res.json({ status: 'ok', broker: `${MQTT_HOST}:${MQTT_PORT}` });
+// Diagnostic endpoint - test database connection directly
+app.get('/debug/db-test', async (req, res) => {
+  const result = {
+    config: {
+      host: process.env.DB_HOST || 'localhost',
+      user: process.env.DB_USER || 'smartdevice',
+      database: 'smartdevice'
+    },
+    connection: null,
+    query_test: null,
+    error: null
+  };
+
+  try {
+    console.log('[DEBUG] Testing database connection to', result.config.host);
+    const conn = await dbPool.getConnection();
+    result.connection = 'success';
+    
+    const [row] = await conn.query('SELECT 1 as test, NOW() as time');
+    result.query_test = row;
+    conn.release();
+  } catch (err) {
+    result.error = err.message;
+    result.error_code = err.code;
+  }
+
+  res.json(result);
 });
 
-// Get device status (multi-device)
-app.get('/api/devices/:deviceId/status', async (req, res) => {
+// Health check (with DB/MQTT diagnostics)
+app.get('/health', async (req, res) => {
+ let dbStatus = 'ok';
+ let dbError = null;
+ try {
+   const conn = await dbPool.getConnection();
+   await conn.query('SELECT 1');
+   conn.release();
+ } catch (err) {
+   dbStatus = 'error';
+   dbError = err.message;
+ }
+  
+ res.json({
+   status: 'ok',
+   mqtt: MQTT_HOST + ':' + MQTT_PORT,
+   database: dbStatus,
+   database_error: dbError
+ });
+});
+
+// Get device status
+app.get('/devices/:deviceId/status', async (req, res) => {
  const { deviceId } = req.params;
   
  try {
@@ -191,9 +256,39 @@ app.get('/api/devices/:deviceId/status', async (req, res) => {
  }
 });
 
-// ─── Light Control (Multi-device) ─────────────────────────────────────────────
+// ─── Light Control ─────────────────────────────────────────────
 
-app.post('/api/devices/:deviceId/light/on', async (req, res) => {
+app.post('/devices/:deviceId/light/on', async (req, res) => {
+ const { deviceId } = req.params;
+  
+ try {
+   const conn = await dbPool.getConnection();
+   const [device] = await conn.query(
+     'SELECT * FROM devices WHERE id = ?',
+     [deviceId]
+   );
+   conn.release();
+    
+   if (!device.length) {
+     return res.status(404).json({ error: 'Device not found' });
+   }
+    
+   const state = deviceState[deviceId] || { light: 'unknown', motor: 'unknown' };
+   res.json({
+     device_id: deviceId,
+     device_name: device[0].name,
+     light: state.light || 'unknown',
+     motor: state.motor || 'unknown',
+     timestamp: new Date().toISOString()
+   });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// ─── Light Control ─────────────────────────────────────────────
+
+app.post('/devices/:deviceId/light/on', async (req, res) => {
  const { deviceId } = req.params;
   
  try {
@@ -211,7 +306,7 @@ app.post('/api/devices/:deviceId/light/on', async (req, res) => {
    const userId = device[0].user_id;
    const topic = `user-${userId}/${deviceId}/light/command`;
     
-   console.log(`[API] POST /api/devices/${deviceId}/light/on → publishing to ${topic}`);
+   console.log(`[API] POST /devices/${deviceId}/light/on → publishing to ${topic}`);
    mqttClient.publish(topic, 'on', async (err) => {
      if (err) {
        return res.status(500).json({ error: 'Failed to publish MQTT message' });
@@ -237,7 +332,7 @@ app.post('/api/devices/:deviceId/light/on', async (req, res) => {
  }
 });
 
-app.post('/api/devices/:deviceId/light/off', async (req, res) => {
+app.post('/devices/:deviceId/light/off', async (req, res) => {
  const { deviceId } = req.params;
   
  try {
@@ -255,7 +350,7 @@ app.post('/api/devices/:deviceId/light/off', async (req, res) => {
    const userId = device[0].user_id;
    const topic = `user-${userId}/${deviceId}/light/command`;
     
-   console.log(`[API] POST /api/devices/${deviceId}/light/off → publishing to ${topic}`);
+   console.log(`[API] POST /devices/${deviceId}/light/off → publishing to ${topic}`);
    mqttClient.publish(topic, 'off', async (err) => {
      if (err) {
        return res.status(500).json({ error: 'Failed to publish MQTT message' });
@@ -280,15 +375,15 @@ app.post('/api/devices/:deviceId/light/off', async (req, res) => {
  }
 });
 
-app.get('/api/devices/:deviceId/light/status', async (req, res) => {
+app.get('/devices/:deviceId/light/status', async (req, res) => {
  const { deviceId } = req.params;
  const state = deviceState[deviceId] || {};
  res.json({ device_id: deviceId, light: state.light || 'unknown' });
 });
 
-// ─── Motor Control (Multi-device) ─────────────────────────────────────────────
+// ─── Motor Control ─────────────────────────────────────────────
 
-app.post('/api/devices/:deviceId/motor/run', async (req, res) => {
+app.post('/devices/:deviceId/motor/run', async (req, res) => {
  const { deviceId } = req.params;
   
  try {
@@ -306,7 +401,7 @@ app.post('/api/devices/:deviceId/motor/run', async (req, res) => {
    const userId = device[0].user_id;
    const topic = `user-${userId}/${deviceId}/motor/command`;
     
-   console.log(`[API] POST /api/devices/${deviceId}/motor/run → publishing to ${topic}`);
+   console.log(`[API] POST /devices/${deviceId}/motor/run → publishing to ${topic}`);
    mqttClient.publish(topic, 'run', async (err) => {
      if (err) {
        return res.status(500).json({ error: 'Failed to publish MQTT message' });
@@ -331,7 +426,7 @@ app.post('/api/devices/:deviceId/motor/run', async (req, res) => {
  }
 });
 
-app.post('/api/devices/:deviceId/motor/stop', async (req, res) => {
+app.post('/devices/:deviceId/motor/stop', async (req, res) => {
  const { deviceId } = req.params;
   
  try {
@@ -349,7 +444,7 @@ app.post('/api/devices/:deviceId/motor/stop', async (req, res) => {
    const userId = device[0].user_id;
    const topic = `user-${userId}/${deviceId}/motor/command`;
     
-   console.log(`[API] POST /api/devices/${deviceId}/motor/stop → publishing to ${topic}`);
+   console.log(`[API] POST /devices/${deviceId}/motor/stop → publishing to ${topic}`);
    mqttClient.publish(topic, 'stop', async (err) => {
      if (err) {
        return res.status(500).json({ error: 'Failed to publish MQTT message' });
@@ -374,57 +469,13 @@ app.post('/api/devices/:deviceId/motor/stop', async (req, res) => {
  }
 });
 
-app.get('/api/devices/:deviceId/motor/status', async (req, res) => {
+app.get('/devices/:deviceId/motor/status', async (req, res) => {
  const { deviceId } = req.params;
  const state = deviceState[deviceId] || {};
  res.json({ device_id: deviceId, motor: state.motor || 'unknown' });
 });
 
-// Legacy single-device endpoints (deprecated, for backward compatibility)
-app.post('/light/on', async (req, res) => {
- const topic = 'user-1/device-esp32/light/command';
- console.log('[API] POST /light/on (legacy)');
- mqttClient.publish(topic, 'on', (err) => {
-   if (err) return res.status(500).json({ error: 'MQTT failed' });
-   res.json({ status: 'ok', light: 'on' });
- });
-});
-
-app.post('/light/off', async (req, res) => {
- const topic = 'user-1/device-esp32/light/command';
- console.log('[API] POST /light/off (legacy)');
- mqttClient.publish(topic, 'off', (err) => {
-   if (err) return res.status(500).json({ error: 'MQTT failed' });
-   res.json({ status: 'ok', light: 'off' });
- });
-});
-
-app.post('/motor/run', async (req, res) => {
- const topic = 'user-1/device-esp32/motor/command';
- console.log('[API] POST /motor/run (legacy)');
- mqttClient.publish(topic, 'run', (err) => {
-   if (err) return res.status(500).json({ error: 'MQTT failed' });
-   res.json({ status: 'ok', motor: 'running' });
- });
-});
-
-app.post('/motor/stop', async (req, res) => {
- const topic = 'user-1/device-esp32/motor/command';
- console.log('[API] POST /motor/stop (legacy)');
- mqttClient.publish(topic, 'stop', (err) => {
-   if (err) return res.status(500).json({ error: 'MQTT failed' });
-   res.json({ status: 'ok', motor: 'stopped' });
- });
-});
-
-app.get('/status', async (req, res) => {
- const state = deviceState['device-esp32'] || {};
- res.json({
-   device: 'smart_device',
-   light: state.light || 'unknown',
-   motor: state.motor || 'unknown'
- });
-});
+// Legacy single-device endpoints (REMOVED - use /devices/{deviceId}/* instead)
 
 // 404 handler
 app.use((req, res) => {
@@ -442,15 +493,15 @@ app.listen(PORT, '0.0.0.0', () => {
  console.log(`🚀 REST Server listening on port ${PORT}`);
  console.log(`📡 MQTT Broker: ${MQTT_HOST}:${MQTT_PORT}`);
  console.log(`🗄️  Database: ${process.env.DB_HOST || 'localhost'}`);
- console.log(`\nAPI Endpoints (Multi-Device):`);
- console.log(`  GET    http://localhost:${PORT}/health`);
- console.log(`  GET    http://localhost:${PORT}/api/devices/:deviceId/status`);
- console.log(`  POST   http://localhost:${PORT}/api/devices/:deviceId/light/on`);
- console.log(`  POST   http://localhost:${PORT}/api/devices/:deviceId/light/off`);
- console.log(`  GET    http://localhost:${PORT}/api/devices/:deviceId/light/status`);
- console.log(`  POST   http://localhost:${PORT}/api/devices/:deviceId/motor/run`);
- console.log(`  POST   http://localhost:${PORT}/api/devices/:deviceId/motor/stop`);
- console.log(`  GET    http://localhost:${PORT}/api/devices/:deviceId/motor/status\n`);
+ console.log(`\nAPI Endpoints:`);
+ console.log(`  GET    https://api.unicornextermination.info/health`);
+ console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/status`);
+ console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/light/on?wait=1`);
+ console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/light/off?wait=1`);
+ console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/light/status`);
+ console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/motor/run?wait=1`);
+ console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/motor/stop?wait=1`);
+ console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/motor/status\n`);
 });
 
 // Graceful shutdown
