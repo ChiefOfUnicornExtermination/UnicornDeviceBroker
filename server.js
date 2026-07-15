@@ -187,6 +187,7 @@ app.get('/debug/db-test', async (req, res) => {
     },
     connection: null,
     query_test: null,
+    devices: null,
     error: null
   };
 
@@ -197,6 +198,9 @@ app.get('/debug/db-test', async (req, res) => {
     
     const [row] = await conn.query('SELECT 1 as test, NOW() as time');
     result.query_test = row;
+
+    // Show all devices so we can verify what's actually in the DB
+    result.devices = await conn.query('SELECT * FROM devices');
     conn.release();
   } catch (err) {
     result.error = err.message;
