@@ -237,7 +237,7 @@ app.get('/devices/:deviceId/status', async (req, res) => {
   
  try {
    const conn = await dbPool.getConnection();
-   const [device] = await conn.query(
+   const device = await conn.query(
      'SELECT * FROM devices WHERE id = ?',
      [deviceId]
    );
@@ -267,37 +267,7 @@ app.post('/devices/:deviceId/light/on', async (req, res) => {
   
  try {
    const conn = await dbPool.getConnection();
-   const [device] = await conn.query(
-     'SELECT * FROM devices WHERE id = ?',
-     [deviceId]
-   );
-   conn.release();
-    
-   if (!device.length) {
-     return res.status(404).json({ error: 'Device not found' });
-   }
-    
-   const state = deviceState[deviceId] || { light: 'unknown', motor: 'unknown' };
-   res.json({
-     device_id: deviceId,
-     device_name: device[0].name,
-     light: state.light || 'unknown',
-     motor: state.motor || 'unknown',
-     timestamp: new Date().toISOString()
-   });
- } catch (err) {
-   res.status(500).json({ error: err.message });
- }
-});
-
-// ─── Light Control ─────────────────────────────────────────────
-
-app.post('/devices/:deviceId/light/on', async (req, res) => {
- const { deviceId } = req.params;
-  
- try {
-   const conn = await dbPool.getConnection();
-   const [device] = await conn.query(
+   const device = await conn.query(
      'SELECT * FROM devices WHERE id = ?',
      [deviceId]
    );
@@ -315,7 +285,6 @@ app.post('/devices/:deviceId/light/on', async (req, res) => {
      if (err) {
        return res.status(500).json({ error: 'Failed to publish MQTT message' });
      }
-     // If caller asked to wait for confirmation
      const wait = (req.query.wait === '1') || (req.body && req.body.wait === true);
      const timeoutMs = (req.body && req.body.timeout) || 5000;
      if (wait) {
@@ -326,7 +295,6 @@ app.post('/devices/:deviceId/light/on', async (req, res) => {
          return res.status(504).json({ error: 'timeout waiting for device', details: e.message });
        }
      }
-
      deviceState[deviceId] = deviceState[deviceId] || {};
      deviceState[deviceId].light = 'on';
      res.json({ status: 'ok', device_id: deviceId, light: 'on' });
@@ -341,7 +309,7 @@ app.post('/devices/:deviceId/light/off', async (req, res) => {
   
  try {
    const conn = await dbPool.getConnection();
-   const [device] = await conn.query(
+   const device = await conn.query(
      'SELECT * FROM devices WHERE id = ?',
      [deviceId]
    );
@@ -369,7 +337,6 @@ app.post('/devices/:deviceId/light/off', async (req, res) => {
          return res.status(504).json({ error: 'timeout waiting for device', details: e.message });
        }
      }
-
      deviceState[deviceId] = deviceState[deviceId] || {};
      deviceState[deviceId].light = 'off';
      res.json({ status: 'ok', device_id: deviceId, light: 'off' });
@@ -392,7 +359,7 @@ app.post('/devices/:deviceId/motor/run', async (req, res) => {
   
  try {
    const conn = await dbPool.getConnection();
-   const [device] = await conn.query(
+   const device = await conn.query(
      'SELECT * FROM devices WHERE id = ?',
      [deviceId]
    );
@@ -420,7 +387,6 @@ app.post('/devices/:deviceId/motor/run', async (req, res) => {
          return res.status(504).json({ error: 'timeout waiting for device', details: e.message });
        }
      }
-
      deviceState[deviceId] = deviceState[deviceId] || {};
      deviceState[deviceId].motor = 'running';
      res.json({ status: 'ok', device_id: deviceId, motor: 'running' });
@@ -435,7 +401,7 @@ app.post('/devices/:deviceId/motor/stop', async (req, res) => {
   
  try {
    const conn = await dbPool.getConnection();
-   const [device] = await conn.query(
+   const device = await conn.query(
      'SELECT * FROM devices WHERE id = ?',
      [deviceId]
    );
@@ -463,7 +429,6 @@ app.post('/devices/:deviceId/motor/stop', async (req, res) => {
          return res.status(504).json({ error: 'timeout waiting for device', details: e.message });
        }
      }
-
      deviceState[deviceId] = deviceState[deviceId] || {};
      deviceState[deviceId].motor = 'stopped';
      res.json({ status: 'ok', device_id: deviceId, motor: 'stopped' });
