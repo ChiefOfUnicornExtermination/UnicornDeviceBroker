@@ -324,7 +324,7 @@ app.post('/devices/:deviceId/light/on', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id;
+   const userId = device[0].user_id ?? 0;
    const topic = `user-${userId}/${deviceId}/light/command`;
     
    console.log(`[API] POST /devices/${deviceId}/light/on → publishing to ${topic}`);
@@ -366,7 +366,7 @@ app.post('/devices/:deviceId/light/off', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id;
+   const userId = device[0].user_id ?? 0;
    const topic = `user-${userId}/${deviceId}/light/command`;
     
    console.log(`[API] POST /devices/${deviceId}/light/off → publishing to ${topic}`);
@@ -416,7 +416,7 @@ app.post('/devices/:deviceId/motor/run', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id;
+   const userId = device[0].user_id ?? 0;
    const topic = `user-${userId}/${deviceId}/motor/command`;
     
    console.log(`[API] POST /devices/${deviceId}/motor/run → publishing to ${topic}`);
@@ -458,7 +458,7 @@ app.post('/devices/:deviceId/motor/stop', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id;
+   const userId = device[0].user_id ?? 0;
    const topic = `user-${userId}/${deviceId}/motor/command`;
     
    console.log(`[API] POST /devices/${deviceId}/motor/stop → publishing to ${topic}`);
