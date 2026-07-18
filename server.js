@@ -54,7 +54,7 @@ const MQTT_CLIENT_ID = 'rest-bridge-' + Math.random().toString(16).substr(2, 8);
 // Device State (in-memory cache per device)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const deviceState = {}; // { "device-AA:BB:CC:DD:EE:FF": { light: "off", motor: "stopped" } }
+const deviceState = {}; // { "device-AA:BB:CC:DD:EE:FF": { light: "off", motor: "stopped", online: false, lastSeen: null } }
 
 // Pending waiters for command confirmation: key => [{ expected, resolve, reject, timeoutId }, ...]
 const pendingStatusWaiters = new Map();
@@ -99,13 +99,16 @@ const mqttClient = mqtt.connect(mqttOptions);
 mqttClient.on('connect', () => {
  console.log('✓ Connected to MQTT broker');
   
- // Subscribe to all device status topics (user-+/device-+/light/status, etc.)
+ // Subscribe to all device status topics
  mqttClient.subscribe('user-+/device-+/light/status', (err) => {
    if (err) console.error('Failed to subscribe to light status:', err);
  });
-  
  mqttClient.subscribe('user-+/device-+/motor/status', (err) => {
    if (err) console.error('Failed to subscribe to motor status:', err);
+ });
+ // Subscribe to online/offline presence (LWT)
+ mqttClient.subscribe('user-+/device-+/online', (err) => {
+   if (err) console.error('Failed to subscribe to online status:', err);
  });
 });
 
@@ -113,55 +116,58 @@ mqttClient.on('message', async (topic, message) => {
  const payload = message.toString();
  console.log(`[MQTT RX] ${topic} → ${payload}`);
   
- // Parse topic: user-{userId}/device-{deviceId}/light/status
+ // Parse topic: user-{userId}/device-{deviceId}/{type}
  const parts = topic.split('/');
- if (parts.length === 4) {
-   const userDevicePart = parts[0]; // "user-123"
-   const devicePart = parts[1];      // "device-abc"
-   const type = parts[2];            // "light" or "motor"
-    
-   const deviceId = `${devicePart}`;
-    
- // Update in-memory cache
-   if (!deviceState[deviceId]) {
-     deviceState[deviceId] = {};
-   }
-   deviceState[deviceId][type] = payload;
+ if (parts.length !== 4) return;
 
-   // Resolve any pending waiters for this device/type
-   try {
-     const key = `${deviceId}:${type}`;
-     const waiters = pendingStatusWaiters.get(key) || [];
-     for (const w of waiters.slice()) {
-       if (!w) continue;
-       if (w.expected === null || String(w.expected) === String(payload)) {
-         clearTimeout(w.timeoutId);
-         try { w.resolve(payload); } catch (_) {}
-         // remove from array
-         const arr = pendingStatusWaiters.get(key) || [];
-         const idx = arr.indexOf(w);
-         if (idx !== -1) arr.splice(idx, 1);
-       }
+ const deviceId = parts[1];  // "device-AA:BB:CC:DD:EE:FF"
+ const type = parts[2];      // "light", "motor", or "online"
+
+ if (!deviceState[deviceId]) deviceState[deviceId] = {};
+
+ // Handle presence (online/offline)
+ if (type === 'online') {
+   deviceState[deviceId].online = (payload === 'online');
+   deviceState[deviceId].lastSeen = payload === 'online' ? new Date().toISOString() : deviceState[deviceId].lastSeen;
+   console.log(`[PRESENCE] ${deviceId} is now ${payload}`);
+   return;
+ }
+
+ // Update in-memory cache for light/motor
+ deviceState[deviceId][type] = payload;
+ deviceState[deviceId].lastSeen = new Date().toISOString();
+
+ // Resolve any pending waiters for this device/type
+ try {
+   const key = `${deviceId}:${type}`;
+   const waiters = pendingStatusWaiters.get(key) || [];
+   for (const w of waiters.slice()) {
+     if (!w) continue;
+     if (w.expected === null || String(w.expected) === String(payload)) {
+       clearTimeout(w.timeoutId);
+       try { w.resolve(payload); } catch (_) {}
+       const arr = pendingStatusWaiters.get(key) || [];
+       const idx = arr.indexOf(w);
+       if (idx !== -1) arr.splice(idx, 1);
      }
-     // cleanup empty
-     if (pendingStatusWaiters.has(key) && pendingStatusWaiters.get(key).length === 0) {
-       pendingStatusWaiters.delete(key);
-     }
-   } catch (e) {
-     console.error('Error resolving waiters:', e.message);
    }
-    
-   // Log to database
-   try {
-     const conn = await dbPool.getConnection();
-     await conn.query(
-       'INSERT INTO device_logs (device_id, action) VALUES (?, ?)',
-       [deviceId, `${type}_${payload}`]
-     );
-     conn.release();
-   } catch (err) {
-     console.error('Failed to log device action:', err.message);
+   if (pendingStatusWaiters.has(key) && pendingStatusWaiters.get(key).length === 0) {
+     pendingStatusWaiters.delete(key);
    }
+ } catch (e) {
+   console.error('Error resolving waiters:', e.message);
+ }
+  
+ // Log to database
+ try {
+   const conn = await dbPool.getConnection();
+   await conn.query(
+     'INSERT INTO device_logs (device_id, action) VALUES (?, ?)',
+     [deviceId, `${type}_${payload}`]
+   );
+   conn.release();
+ } catch (err) {
+   console.error('Failed to log device action:', err.message);
  }
 });
 
@@ -210,7 +216,46 @@ app.get('/debug/db-test', async (req, res) => {
   res.json(result);
 });
 
-// Health check (with DB/MQTT diagnostics)
+// Device self-registration — called by device on every boot after WiFi connects
+// Safe to call multiple times — idempotent (won't create duplicates)
+app.post('/devices/register', async (req, res) => {
+  const { device_id, name } = req.body;
+
+  if (!device_id) {
+    return res.status(400).json({ error: 'device_id is required' });
+  }
+
+  try {
+    const conn = await dbPool.getConnection();
+
+    // Check if already registered
+    const existing = await conn.query(
+      'SELECT * FROM devices WHERE id = ?',
+      [device_id]
+    );
+
+    if (existing.length > 0) {
+      conn.release();
+      console.log(`[REGISTER] Device already registered: ${device_id}`);
+      return res.json({ registered: false, already_existed: true, device_id });
+    }
+
+    // Insert new device with no user (user_id = NULL, claimed later)
+    await conn.query(
+      'INSERT INTO devices (id, user_id, name, type) VALUES (?, NULL, ?, ?)',
+      [device_id, name || device_id, 'smart_device']
+    );
+    conn.release();
+
+    console.log(`[REGISTER] New device registered: ${device_id}`);
+    res.json({ registered: true, already_existed: false, device_id });
+  } catch (err) {
+    console.error('[REGISTER] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.get('/health', async (req, res) => {
  let dbStatus = 'ok';
  let dbError = null;
@@ -247,12 +292,14 @@ app.get('/devices/:deviceId/status', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const state = deviceState[deviceId] || { light: 'unknown', motor: 'unknown' };
+   const state = deviceState[deviceId] || {};
    res.json({
      device_id: deviceId,
      device_name: device[0].name,
+     online: state.online === true,
      light: state.light || 'unknown',
      motor: state.motor || 'unknown',
+     last_seen: state.lastSeen || null,
      timestamp: new Date().toISOString()
    });
  } catch (err) {
