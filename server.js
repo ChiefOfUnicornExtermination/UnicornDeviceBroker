@@ -344,7 +344,7 @@ app.get('/firmware/info', (req, res) => {
   });
 });
 
- async (req, res) => {
+app.get('/health', async (req, res) => {
  let dbStatus = 'ok';
  let dbError = null;
  try {
