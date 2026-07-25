@@ -2,6 +2,8 @@ const express = require('express');
 const mqtt = require('mqtt');
 const cors = require('cors');
 const mariadb = require('mariadb');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -100,14 +102,14 @@ mqttClient.on('connect', () => {
  console.log('✓ Connected to MQTT broker');
   
  // Subscribe to all device status topics
- mqttClient.subscribe('user-+/device-+/light/status', (err) => {
+ mqttClient.subscribe('device-+/light/status', (err) => {
    if (err) console.error('Failed to subscribe to light status:', err);
  });
- mqttClient.subscribe('user-+/device-+/motor/status', (err) => {
+ mqttClient.subscribe('device-+/motor/status', (err) => {
    if (err) console.error('Failed to subscribe to motor status:', err);
  });
  // Subscribe to online/offline presence (LWT)
- mqttClient.subscribe('user-+/device-+/online', (err) => {
+ mqttClient.subscribe('device-+/online', (err) => {
    if (err) console.error('Failed to subscribe to online status:', err);
  });
 });
@@ -115,25 +117,26 @@ mqttClient.on('connect', () => {
 mqttClient.on('message', async (topic, message) => {
  const payload = message.toString();
  console.log(`[MQTT RX] ${topic} → ${payload}`);
-  
- // Parse topic: user-{userId}/device-{deviceId}/{type}
- const parts = topic.split('/');
- if (parts.length !== 4) return;
 
- const deviceId = parts[1];  // "device-AA:BB:CC:DD:EE:FF"
- const type = parts[2];      // "light", "motor", or "online"
+ // Topics: device-{id}/online  OR  device-{id}/light/status  OR  device-{id}/motor/status
+ const parts = topic.split('/');
+ const deviceId = parts[0];  // "device-AA:BB:CC:DD:EE:FF"
 
  if (!deviceState[deviceId]) deviceState[deviceId] = {};
 
- // Handle presence (online/offline)
- if (type === 'online') {
+ // Handle presence (online/offline): device-xxx/online (2 parts)
+ if (parts.length === 2 && parts[1] === 'online') {
    deviceState[deviceId].online = (payload === 'online');
-   deviceState[deviceId].lastSeen = payload === 'online' ? new Date().toISOString() : deviceState[deviceId].lastSeen;
+   if (payload === 'online') deviceState[deviceId].lastSeen = new Date().toISOString();
    console.log(`[PRESENCE] ${deviceId} is now ${payload}`);
    return;
  }
 
- // Update in-memory cache for light/motor
+ // Status updates: device-xxx/light/status or device-xxx/motor/status (3 parts)
+ if (parts.length !== 3) return;
+ const type = parts[1];  // "light" or "motor"
+
+ // Update in-memory cache
  deviceState[deviceId][type] = payload;
  deviceState[deviceId].lastSeen = new Date().toISOString();
 
@@ -216,6 +219,14 @@ app.get('/debug/db-test', async (req, res) => {
   res.json(result);
 });
 
+// Generates a short, human-friendly claim code (6 chars, no confusing chars)
+function generateClaimCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0,O,1,I
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
 // Device self-registration — called by device on every boot after WiFi connects
 // Safe to call multiple times — idempotent (won't create duplicates)
 app.post('/devices/register', async (req, res) => {
@@ -235,28 +246,105 @@ app.post('/devices/register', async (req, res) => {
     );
 
     if (existing.length > 0) {
+      let claimCode = existing[0].claim_code;
+      if (!claimCode) {
+        // Backfill claim code for devices registered before this feature existed
+        claimCode = generateClaimCode();
+        await conn.query('UPDATE devices SET claim_code = ? WHERE id = ?', [claimCode, device_id]);
+      }
       conn.release();
-      console.log(`[REGISTER] Device already registered: ${device_id}`);
-      return res.json({ registered: false, already_existed: true, device_id });
+      console.log(`[REGISTER] Device already registered: ${device_id} (claim: ${claimCode})`);
+      return res.json({ registered: false, already_existed: true, device_id, claim_code: claimCode });
     }
 
     // Insert new device with no user (user_id = NULL, claimed later)
+    const claim_code = generateClaimCode();
     await conn.query(
-      'INSERT INTO devices (id, user_id, name, type) VALUES (?, NULL, ?, ?)',
-      [device_id, name || device_id, 'smart_device']
+      'INSERT INTO devices (id, user_id, name, type, claim_code) VALUES (?, NULL, ?, ?, ?)',
+      [device_id, name || device_id, 'smart_device', claim_code]
     );
     conn.release();
 
-    console.log(`[REGISTER] New device registered: ${device_id}`);
-    res.json({ registered: true, already_existed: false, device_id });
+    console.log(`[REGISTER] New device registered: ${device_id} (claim: ${claim_code})`);
+    res.json({ registered: true, already_existed: false, device_id, claim_code });
   } catch (err) {
     console.error('[REGISTER] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
+// Device claiming — links a registered device to a user account
+// POST /devices/claim  body: { claim_code: "ABC123" or "ABC-123", user_id: 1 }
+app.post('/devices/claim', async (req, res) => {
+  const { claim_code, user_id } = req.body;
+  const normalizedCode = (claim_code || '').replace(/-/g, '').toUpperCase().trim();
 
-app.get('/health', async (req, res) => {
+  if (!normalizedCode || normalizedCode.length !== 6) {
+    return res.status(400).json({ error: 'claim_code must be 6 characters (e.g. "ABC123" or "ABC-123")' });
+  }
+  if (!user_id) {
+    return res.status(400).json({ error: 'user_id is required' });
+  }
+
+  try {
+    const conn = await dbPool.getConnection();
+    const devices = await conn.query('SELECT * FROM devices WHERE claim_code = ?', [normalizedCode]);
+
+    if (!devices.length) {
+      conn.release();
+      return res.status(404).json({ error: 'No device found with that claim code' });
+    }
+
+    const device = devices[0];
+    await conn.query('UPDATE devices SET user_id = ? WHERE claim_code = ?', [user_id, normalizedCode]);
+    conn.release();
+
+    console.log(`[CLAIM] Device ${device.id} claimed by user ${user_id}`);
+    res.json({ success: true, device_id: device.id, user_id: parseInt(user_id) });
+  } catch (err) {
+    console.error('[CLAIM] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTA Firmware Update Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FIRMWARE_DIR = process.env.FIRMWARE_DIR || '/firmware';
+const CURRENT_FIRMWARE_VERSION = parseInt(process.env.FIRMWARE_VERSION || '1');
+
+// GET /firmware/version — device checks this on every boot
+app.get('/firmware/version', (req, res) => {
+  res.json({ version: CURRENT_FIRMWARE_VERSION });
+});
+
+// GET /firmware/latest.bin — device downloads this when update available
+app.get('/firmware/latest.bin', (req, res) => {
+  const binPath = path.join(FIRMWARE_DIR, 'latest.bin');
+  if (!fs.existsSync(binPath)) {
+    console.error('[OTA] Firmware file not found at:', binPath);
+    return res.status(404).json({ error: 'Firmware file not found' });
+  }
+  console.log('[OTA] Serving firmware update to device');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.sendFile(binPath);
+});
+
+// GET /firmware/info — human-readable firmware info
+app.get('/firmware/info', (req, res) => {
+  const binPath = path.join(FIRMWARE_DIR, 'latest.bin');
+  const exists = fs.existsSync(binPath);
+  res.json({
+    current_version: CURRENT_FIRMWARE_VERSION,
+    firmware_file_exists: exists,
+    firmware_path: binPath,
+    firmware_size_bytes: exists ? fs.statSync(binPath).size : null
+  });
+});
+
+ async (req, res) => {
  let dbStatus = 'ok';
  let dbError = null;
  try {
@@ -324,8 +412,7 @@ app.post('/devices/:deviceId/light/on', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id ?? 0;
-   const topic = `user-${userId}/${deviceId}/light/command`;
+   const topic = `${deviceId}/light/command`;
     
    console.log(`[API] POST /devices/${deviceId}/light/on → publishing to ${topic}`);
    mqttClient.publish(topic, 'on', async (err) => {
@@ -366,8 +453,7 @@ app.post('/devices/:deviceId/light/off', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id ?? 0;
-   const topic = `user-${userId}/${deviceId}/light/command`;
+   const topic = `${deviceId}/light/command`;
     
    console.log(`[API] POST /devices/${deviceId}/light/off → publishing to ${topic}`);
    mqttClient.publish(topic, 'off', async (err) => {
@@ -416,8 +502,7 @@ app.post('/devices/:deviceId/motor/run', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id ?? 0;
-   const topic = `user-${userId}/${deviceId}/motor/command`;
+   const topic = `${deviceId}/motor/command`;
     
    console.log(`[API] POST /devices/${deviceId}/motor/run → publishing to ${topic}`);
    mqttClient.publish(topic, 'run', async (err) => {
@@ -458,8 +543,7 @@ app.post('/devices/:deviceId/motor/stop', async (req, res) => {
      return res.status(404).json({ error: 'Device not found' });
    }
     
-   const userId = device[0].user_id ?? 0;
-   const topic = `user-${userId}/${deviceId}/motor/command`;
+   const topic = `${deviceId}/motor/command`;
     
    console.log(`[API] POST /devices/${deviceId}/motor/stop → publishing to ${topic}`);
    mqttClient.publish(topic, 'stop', async (err) => {
@@ -517,7 +601,11 @@ app.listen(PORT, '0.0.0.0', () => {
  console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/light/status`);
  console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/motor/run?wait=1`);
  console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/motor/stop?wait=1`);
- console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/motor/status\n`);
+ console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/motor/status`);
+ console.log(`  POST   https://api.unicornextermination.info/devices/claim`);
+ console.log(`  GET    https://api.unicornextermination.info/firmware/version`);
+ console.log(`  GET    https://api.unicornextermination.info/firmware/latest.bin`);
+ console.log(`  GET    https://api.unicornextermination.info/firmware/info\n`);
 });
 
 // Graceful shutdown
