@@ -310,38 +310,77 @@ app.post('/devices/claim', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OTA Firmware Update Endpoints
+// Each hardware variant has its own subfolder:
+//   /firmware/penlightwaver/latest.bin
+//   /firmware/tabletopwaver/latest.bin  ← future
+//
+// Devices send their DEVICE_TYPE in the URL path, so they never get the
+// wrong firmware even if all device types are deployed at the same time.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FIRMWARE_DIR = process.env.FIRMWARE_DIR || '/firmware';
-const CURRENT_FIRMWARE_VERSION = parseInt(process.env.FIRMWARE_VERSION || '1');
 
-// GET /firmware/version — device checks this on every boot
-app.get('/firmware/version', (req, res) => {
-  res.json({ version: CURRENT_FIRMWARE_VERSION });
+// Firmware version is stored per device type in a versions.json file.
+// Format: { "penlightwaver": 1, "tabletopwaver": 1 }
+// Falls back to FIRMWARE_VERSION env var for backward compat.
+function getFirmwareVersion(deviceType) {
+  const versionsPath = path.join(FIRMWARE_DIR, 'versions.json');
+  if (fs.existsSync(versionsPath)) {
+    try {
+      const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
+      if (versions[deviceType] !== undefined) return versions[deviceType];
+    } catch (e) { /* fall through */ }
+  }
+  return parseInt(process.env.FIRMWARE_VERSION || '1');
+}
+
+// GET /firmware/:deviceType/version — device checks this on every boot
+// e.g. GET /firmware/penlightwaver/version  →  {"version": 2}
+app.get('/firmware/:deviceType/version', (req, res) => {
+  const { deviceType } = req.params;
+  const version = getFirmwareVersion(deviceType);
+  console.log(`[OTA] Version check: ${deviceType} → v${version}`);
+  res.json({ version });
 });
 
-// GET /firmware/latest.bin — device downloads this when update available
-app.get('/firmware/latest.bin', (req, res) => {
-  const binPath = path.join(FIRMWARE_DIR, 'latest.bin');
+// GET /firmware/:deviceType/latest.bin — device downloads new firmware here
+app.get('/firmware/:deviceType/latest.bin', (req, res) => {
+  const { deviceType } = req.params;
+  const binPath = path.join(FIRMWARE_DIR, deviceType, 'latest.bin');
   if (!fs.existsSync(binPath)) {
-    console.error('[OTA] Firmware file not found at:', binPath);
-    return res.status(404).json({ error: 'Firmware file not found' });
+    console.error(`[OTA] Firmware not found: ${binPath}`);
+    return res.status(404).json({ error: `No firmware found for device type: ${deviceType}` });
   }
-  console.log('[OTA] Serving firmware update to device');
+  console.log(`[OTA] Serving firmware to ${deviceType} device`);
   res.setHeader('Content-Type', 'application/octet-stream');
   res.sendFile(binPath);
 });
 
-// GET /firmware/info — human-readable firmware info
+// GET /firmware/info — human-readable status for all device types
 app.get('/firmware/info', (req, res) => {
-  const binPath = path.join(FIRMWARE_DIR, 'latest.bin');
-  const exists = fs.existsSync(binPath);
-  res.json({
-    current_version: CURRENT_FIRMWARE_VERSION,
-    firmware_file_exists: exists,
-    firmware_path: binPath,
-    firmware_size_bytes: exists ? fs.statSync(binPath).size : null
+  const versionsPath = path.join(FIRMWARE_DIR, 'versions.json');
+  let versions = {};
+  if (fs.existsSync(versionsPath)) {
+    try { versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8')); } catch (e) {}
+  }
+
+  const deviceTypes = fs.existsSync(FIRMWARE_DIR)
+    ? fs.readdirSync(FIRMWARE_DIR).filter(f =>
+        fs.statSync(path.join(FIRMWARE_DIR, f)).isDirectory())
+    : [];
+
+  const info = deviceTypes.map(dt => {
+    const binPath = path.join(FIRMWARE_DIR, dt, 'latest.bin');
+    const exists = fs.existsSync(binPath);
+    return {
+      device_type: dt,
+      version: versions[dt] ?? null,
+      firmware_file_exists: exists,
+      firmware_size_bytes: exists ? fs.statSync(binPath).size : null
+    };
   });
+
+  res.json({ firmware_dir: FIRMWARE_DIR, device_types: info });
 });
 
 app.get('/health', async (req, res) => {
@@ -603,8 +642,8 @@ app.listen(PORT, '0.0.0.0', () => {
  console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/motor/stop?wait=1`);
  console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/motor/status`);
  console.log(`  POST   https://api.unicornextermination.info/devices/claim`);
- console.log(`  GET    https://api.unicornextermination.info/firmware/version`);
- console.log(`  GET    https://api.unicornextermination.info/firmware/latest.bin`);
+ console.log(`  GET    https://api.unicornextermination.info/firmware/penlightwaver/version`);
+ console.log(`  GET    https://api.unicornextermination.info/firmware/penlightwaver/latest.bin`);
  console.log(`  GET    https://api.unicornextermination.info/firmware/info\n`);
 });
 
