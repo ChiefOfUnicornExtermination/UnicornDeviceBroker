@@ -13,11 +13,15 @@ RUN npm ci --only=production
 # Copy application code
 COPY server.js .
 
+# Copy firmware files for OTA (place compiled .bin here before deploying)
+COPY firmware_files/ /firmware/
+
 # Expose port
 EXPOSE 8080
 
 # Set environment
 ENV PORT=8080
+ENV FIRMWARE_DIR=/firmware
 
 # Start the server
 CMD ["npm", "start"]
