@@ -8,16 +8,16 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
+const app = express();
+app.use(express.json());
+app.use(cors());
+app.use(express.static('public'));
+
 const path = require('path'); // already present
 // Serve dashboard at root when host is devices.* (or always if you prefer)
 app.get('/', (req, res, next) => { const host = (req.headers.host || '').split(':')[0]; // strip port if (host.startsWith('devices.')) {
     return res.sendFile(path.join(__dirname, 'public', 'index.html')); } // if not devices.* let API handle root or fallthrough return res.status(404).json({ error: 'endpoint not found' });
 });
-
-const app = express();
-app.use(express.json());
-app.use(cors());
-app.use(express.static('public'));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JWT Configuration
