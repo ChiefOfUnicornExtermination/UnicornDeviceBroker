@@ -13,8 +13,17 @@ app.use(express.json());
 app.use(cors());
 app.use(express.static('public'));
 
-app.get('/', (req, res, next) => { const host = (req.headers.host || '').split(':')[0]; // strip port if (host.startsWith('devices.')) {
-    return res.sendFile(path.join(__dirname, 'public', 'index.html')); } // if not devices.* let API handle root or fallthrough return res.status(404).json({ error: 'endpoint not found' });
+// Serve UI on root for devices.* domain; otherwise respond with a simple API root message
+app.get('/', (req, res) => {
+  try {
+    const host = (req.headers.host || '').split(':')[0];
+    if (host && host.startsWith('devices.')) {
+      return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    }
+  } catch (e) {
+    // ignore and fall through to JSON response
+  }
+  return res.json({ message: 'Smart Device REST API' });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
