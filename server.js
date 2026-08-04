@@ -4,7 +4,7 @@ const cors = require('cors');
 const mariadb = require('mariadb');
 const fs = require('fs');
 const path = require('path');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
@@ -329,8 +329,8 @@ app.post('/auth/signup', async (req, res) => {
       return res.status(409).json({ error: 'Email already registered' });
     }
 
-    // Hash password and insert user
-    const passwordHash = await bcrypt.hash(password, 10);
+    // Hash password and insert user (synchronous bcryptjs)
+    const passwordHash = bcrypt.hashSync(password, 10);
     const result = await conn.query(
       'INSERT INTO users (email, password_hash) VALUES (?, ?)',
       [email, passwordHash]
@@ -369,7 +369,7 @@ app.post('/auth/login', async (req, res) => {
     }
 
     const user = users[0];
-    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    const passwordMatch = bcrypt.compareSync(password, user.password_hash);
     if (!passwordMatch) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
