@@ -4,11 +4,40 @@ const cors = require('cors');
 const mariadb = require('mariadb');
 const fs = require('fs');
 const path = require('path');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+app.use(express.static('public'));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JWT Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
+  console.error('ERROR: JWT_SECRET environment variable not set in production!');
+  process.exit(1);
+}
+
+// Middleware: verify JWT token from Authorization header
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid authorization header' });
+  }
+
+  const token = authHeader.substring(7);
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Database Configuration
@@ -273,17 +302,118 @@ app.post('/devices/register', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /auth/signup — create a new user account
+// body: { email: "user@example.com", password: "secret123" }
+app.post('/auth/signup', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({ error: 'password must be at least 6 characters' });
+  }
+
+  try {
+    const conn = await dbPool.getConnection();
+    
+    // Check if user already exists
+    const existing = await conn.query('SELECT id FROM users WHERE email = ?', [email]);
+    if (existing.length > 0) {
+      conn.release();
+      return res.status(409).json({ error: 'Email already registered' });
+    }
+
+    // Hash password and insert user
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await conn.query(
+      'INSERT INTO users (email, password_hash) VALUES (?, ?)',
+      [email, passwordHash]
+    );
+    conn.release();
+
+    console.log(`[AUTH] New user registered: ${email}`);
+
+    res.status(201).json({
+      message: 'Account created successfully',
+      user_id: result.insertId,
+      email: email
+    });
+  } catch (err) {
+    console.error('[AUTH] Signup error:', err.message);
+    res.status(500).json({ error: 'Failed to create account' });
+  }
+});
+
+// POST /auth/login — authenticate and get JWT token
+// body: { email: "user@example.com", password: "secret123" }
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
+  }
+
+  try {
+    const conn = await dbPool.getConnection();
+    const users = await conn.query('SELECT id, email, password_hash FROM users WHERE email = ?', [email]);
+    conn.release();
+
+    if (users.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = users[0];
+    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Generate JWT token (valid for 7 days)
+    const token = jwt.sign(
+      { user_id: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    console.log(`[AUTH] User logged in: ${email}`);
+
+    res.json({
+      message: 'Login successful',
+      token: token,
+      user_id: user.id,
+      email: user.email
+    });
+  } catch (err) {
+    console.error('[AUTH] Login error:', err.message);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// POST /auth/verify — check if token is valid
+app.post('/auth/verify', authMiddleware, (req, res) => {
+  res.json({
+    message: 'Token is valid',
+    user_id: req.user.user_id,
+    email: req.user.email
+  });
+});
+
 // Device claiming — links a registered device to a user account
-// POST /devices/claim  body: { claim_code: "ABC123" or "ABC-123", user_id: 1 }
-app.post('/devices/claim', async (req, res) => {
-  const { claim_code, user_id } = req.body;
+// POST /devices/claim  body: { claim_code: "ABC123" or "ABC-123" }
+// Requires: Authorization: Bearer {jwt_token}
+app.post('/devices/claim', authMiddleware, async (req, res) => {
+  const { claim_code } = req.body;
+  const user_id = req.user.user_id;
   const normalizedCode = (claim_code || '').replace(/-/g, '').toUpperCase().trim();
 
   if (!normalizedCode || normalizedCode.length !== 6) {
     return res.status(400).json({ error: 'claim_code must be 6 characters (e.g. "ABC123" or "ABC-123")' });
-  }
-  if (!user_id) {
-    return res.status(400).json({ error: 'user_id is required' });
   }
 
   try {
@@ -300,7 +430,7 @@ app.post('/devices/claim', async (req, res) => {
     conn.release();
 
     console.log(`[CLAIM] Device ${device.id} claimed by user ${user_id}`);
-    res.json({ success: true, device_id: device.id, user_id: parseInt(user_id) });
+    res.json({ success: true, device_id: device.id, user_id: user_id });
   } catch (err) {
     console.error('[CLAIM] Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -633,18 +763,24 @@ app.listen(PORT, '0.0.0.0', () => {
  console.log(`📡 MQTT Broker: ${MQTT_HOST}:${MQTT_PORT}`);
  console.log(`🗄️  Database: ${process.env.DB_HOST || 'localhost'}`);
  console.log(`\nAPI Endpoints:`);
- console.log(`  GET    https://api.unicornextermination.info/health`);
- console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/status`);
- console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/light/on?wait=1`);
- console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/light/off?wait=1`);
- console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/light/status`);
- console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/motor/run?wait=1`);
- console.log(`  POST   https://api.unicornextermination.info/devices/:deviceId/motor/stop?wait=1`);
- console.log(`  GET    https://api.unicornextermination.info/devices/:deviceId/motor/status`);
- console.log(`  POST   https://api.unicornextermination.info/devices/claim`);
- console.log(`  GET    https://api.unicornextermination.info/firmware/penlightwaver/version`);
- console.log(`  GET    https://api.unicornextermination.info/firmware/penlightwaver/latest.bin`);
- console.log(`  GET    https://api.unicornextermination.info/firmware/info\n`);
+ console.log(`\n  Authentication:`);
+ console.log(`  POST   /auth/signup                           (body: {email, password})`);
+ console.log(`  POST   /auth/login                            (body: {email, password})`);
+ console.log(`  POST   /auth/verify                           (requires auth header)`);
+ console.log(`\n  Device Management:`);
+ console.log(`  GET    /health`);
+ console.log(`  GET    /devices/:deviceId/status              (requires auth)`);
+ console.log(`  POST   /devices/:deviceId/light/on            (requires auth)`);
+ console.log(`  POST   /devices/:deviceId/light/off           (requires auth)`);
+ console.log(`  GET    /devices/:deviceId/light/status        (requires auth)`);
+ console.log(`  POST   /devices/:deviceId/motor/run           (requires auth)`);
+ console.log(`  POST   /devices/:deviceId/motor/stop          (requires auth)`);
+ console.log(`  GET    /devices/:deviceId/motor/status        (requires auth)`);
+ console.log(`  POST   /devices/claim                         (body: {claim_code}, requires auth)`);
+ console.log(`\n  Firmware Updates:`);
+ console.log(`  GET    /firmware/penlightwaver/version`);
+ console.log(`  GET    /firmware/penlightwaver/latest.bin`);
+ console.log(`  GET    /firmware/info\n`);
 });
 
 // Graceful shutdown
