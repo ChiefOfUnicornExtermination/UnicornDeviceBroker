@@ -13,6 +13,9 @@ RUN npm ci --only=production
 # Copy application code
 COPY server.js .
 
+# Copy static UI files into the image
+COPY public/ ./public
+
 # Copy firmware files for OTA (place compiled .bin here before deploying)
 COPY firmware_files/ /firmware/
 
