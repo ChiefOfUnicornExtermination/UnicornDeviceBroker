@@ -11,20 +11,26 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 app.use(cors());
-app.use(express.static('public'));
 
 // Serve UI on root for devices.* domain; otherwise respond with a simple API root message
 app.get('/', (req, res) => {
+  const host = (req.headers.host || '').split(':')[0] || '';
+  console.log(`[HTTP] GET /  Host: ${host}`);
   try {
-    const host = (req.headers.host || '').split(':')[0];
     if (host && host.startsWith('devices.')) {
+      console.log('[HTTP] Serving UI for devices domain');
       return res.sendFile(path.join(__dirname, 'public', 'index.html'));
     }
   } catch (e) {
+    console.error('[HTTP] Error while serving UI:', e.message);
     // ignore and fall through to JSON response
   }
+  console.log('[HTTP] Serving API JSON at root');
   return res.json({ message: 'Smart Device REST API' });
 });
+
+// Serve static assets (JS/CSS) from /public
+app.use(express.static('public'));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JWT Configuration
