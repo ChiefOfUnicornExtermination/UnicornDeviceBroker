@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <title>Smart Device Control</title>
   <style>
     * {
@@ -13,7 +14,7 @@
     
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background-image: url(/bg.png);
       min-height: 100vh;
       display: flex;
       align-items: center;
@@ -202,8 +203,24 @@
 <body>
   <div class="container">
     <div class="header">
-      <h1>🌈 Smart Device</h1>
-      <p>Control your light waver</p>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div>
+          <h1 id="site-title">🌈 Smart Device</h1>
+          <p id="site-subtitle">Control your light waver</p>
+        </div>
+        <div>
+          <label for="lang-select" style="color:white;font-weight:600;margin-right:8px;">Lang</label>
+          <select id="lang-select" style="padding:6px;border-radius:6px;border:none;">
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="zh-TW">繁體中文</option>
+            <option value="ko">한국어</option>
+          </select>
+        </div>
+      </div>
     </div>
     
     <div class="content">
@@ -287,7 +304,8 @@
     let userId = localStorage.getItem('user_id');
     let userEmail = localStorage.getItem('user_email');
     
-    // Initialize: show dashboard if logged in
+    // Initialize: capture claim param and show dashboard if logged in
+    setPendingClaimFromUrl();
     if (token) {
       showDashboard();
     }
@@ -381,11 +399,49 @@
       }
     }
     
+    function setPendingClaimFromUrl() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const claim = params.get('claim') || params.get('c');
+        if (claim) {
+          const normalized = claim.toUpperCase().replace(/-/g, '');
+          localStorage.setItem('pending_claim', normalized);
+          const el = document.getElementById('claim-code');
+          if (el) el.value = claim;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    async function checkPendingClaim() {
+      const pending = localStorage.getItem('pending_claim');
+      if (!pending) return;
+      const el = document.getElementById('claim-code');
+      if (el) el.value = pending;
+
+      if (token) {
+        // attempt claim; claimDevice handles UI messages
+        try {
+          await claimDevice();
+          localStorage.removeItem('pending_claim');
+        } catch (e) {
+          // leave pending for retry after next login
+          console.warn('Auto-claim failed:', e.message || e);
+        }
+      } else {
+        // prompt user to login so they can claim
+        showTab('login');
+      }
+    }
+
     function showDashboard() {
       document.getElementById('authTabs').style.display = 'none';
       document.getElementById('dashboard').classList.add('active');
       document.getElementById('user-email').textContent = userEmail;
       document.getElementById('user-id').textContent = userId;
+      // try to claim if a pending claim exists
+      checkPendingClaim();
     }
     
     async function claimDevice() {
@@ -403,6 +459,12 @@
       }
       
       try {
+        if (!token) {
+          errorEl.textContent = 'Not logged in. Please log in to claim devices.';
+          errorEl.style.display = 'block';
+          return;
+        }
+
         const response = await fetch(`${API_URL}/devices/claim`, {
           method: 'POST',
           headers: {
@@ -442,5 +504,6 @@
       showTab('login');
     }
   </script>
+  <script src="/i18n.js"></script>
 </body>
 </html>
