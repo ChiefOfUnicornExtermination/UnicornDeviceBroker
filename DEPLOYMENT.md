@@ -151,6 +151,123 @@ mosquitto_sub -h localhost -t "smartdevice/#"
 
 ---
 
+## Step 5: OTA Firmware Updates
+
+### 5.1 How it works
+
+Every time the ESP32 boots and connects to WiFi, it calls:
+```
+GET https://api.unicornextermination.info/firmware/version
+```
+Response: `{"version": 2}`
+
+If the server version is higher than the number in `FIRMWARE_VERSION` constant in the firmware,
+the device automatically downloads and flashes the new firmware:
+```
+GET https://api.unicornextermination.info/firmware/latest.bin
+```
+Then reboots. No USB cable needed.
+
+### 5.2 Workflow to release a firmware update
+
+**Step 1: Compile the new firmware in Arduino IDE**
+1. Open Arduino IDE
+2. Increase `FIRMWARE_VERSION` number (e.g. 1 → 2)
+3. Click: `Sketch` → `Export Compiled Binary`
+4. This creates a `.bin` file in your sketch folder
+   (e.g. `smart_device.ino.bin`)
+
+**Step 2: Upload the .bin file to Cloud Run**
+
+Option A — Upload directly to the running container (quick test):
+```bash
+# Copy the .bin file into the running container
+gcloud run services describe smart-device-server --format='value(status.url)'
+# Then use Cloud Run SSH or rebuild (Option B is cleaner)
+```
+
+Option B — Rebuild and redeploy with firmware included (recommended):
+```bash
+# Copy your compiled .bin into the server folder
+cp path/to/smart_device.ino.bin server/firmware_files/latest.bin
+
+# Update the version number in Dockerfile (or use env var)
+# ENV FIRMWARE_VERSION=2
+
+# Redeploy
+cd server/
+gcloud run deploy smart-device-server \
+  --source . \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars FIRMWARE_VERSION=2
+```
+
+**Step 3: Verify the update was uploaded**
+```bash
+curl https://api.unicornextermination.info/firmware/info
+```
+Expected:
+```json
+{
+  "current_version": 2,
+  "firmware_file_exists": true,
+  "firmware_path": "/firmware/latest.bin",
+  "firmware_size_bytes": 847362
+}
+```
+
+**Step 4: Test on one device first**
+- Reset your ESP32
+- Watch Serial Monitor — you should see:
+  ```
+  [OTA] Checking for firmware update...
+  [OTA] Current version: 1
+  [OTA] Server version: 2
+  [OTA] Update available! Downloading v2...
+  [OTA] Update successful! Rebooting...
+  ```
+- After reboot, Serial Monitor shows version 2
+
+### 5.3 Store .bin files properly for Cloud Run
+
+Cloud Run containers are stateless — files you copy in won't survive a restart.
+Best practice: store `.bin` files inside the Docker image itself.
+
+Create this folder structure:
+```
+server/
+  server.js
+  Dockerfile
+  package.json
+  firmware_files/
+    latest.bin    ← compiled from Arduino IDE
+```
+
+Update Dockerfile to copy firmware files:
+```dockerfile
+# Copy firmware files for OTA
+COPY firmware_files/ /firmware/
+```
+
+Then the `.bin` file is baked into the container image and survives restarts.
+
+### 5.4 Environment variables for Cloud Run
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FIRMWARE_VERSION` | `1` | Version number to report to devices |
+| `FIRMWARE_DIR` | `/firmware` | Where `.bin` files are stored |
+
+Update version when deploying:
+```bash
+gcloud run deploy smart-device-server \
+  --set-env-vars FIRMWARE_VERSION=2
+```
+
+---
+
 ## Troubleshooting
 
 ### ESP32 can't connect to MQTT broker
@@ -163,6 +280,12 @@ mosquitto_sub -h localhost -t "smartdevice/#"
 
 - Check MQTT_BROKER environment variable in Cloud Run settings
 - Check logs: `gcloud run logs read smart-device-server`
+
+### OTA update fails
+
+- Check `/firmware/info` endpoint — is `firmware_file_exists: true`?
+- Check device serial log for the exact error message
+- Make sure FIRMWARE_VERSION env var on server > version compiled into device
 
 ### Domain mapping (optional)
 
@@ -193,3 +316,4 @@ Once this is working:
 1. Add authentication (OAuth or API keys)
 2. Build a mobile app with Bluetooth provisioning
 3. Add database to store device history
+

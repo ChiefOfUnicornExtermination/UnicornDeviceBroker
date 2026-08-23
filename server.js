@@ -6,31 +6,48 @@ const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 app.use(cors());
+const SERVICE_TYPE = process.env.SERVICE_TYPE || 'api';
+console.log(`[START] SERVICE_TYPE=${SERVICE_TYPE}`);
 
-// Serve UI on root for devices.* domain; otherwise respond with a simple API root message
+// Serve UI on root for devices.* domain when running as UI service; otherwise respond with a simple API root message
 app.get('/', (req, res) => {
+  const serviceType = SERVICE_TYPE;
   const host = (req.headers.host || '').split(':')[0] || '';
-  console.log(`[HTTP] GET /  Host: ${host}`);
-  try {
-    if (host && host.startsWith('devices.')) {
-      console.log('[HTTP] Serving UI for devices domain');
-      return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  console.log(`[HTTP] GET /  Host: ${host}  SERVICE: ${serviceType}`);
+
+  // UI service: always serve the index.html
+  if (serviceType === 'ui') {
+    try {
+      console.log('[HTTP] Serving UI (SERVICE_TYPE=ui)');
+      const fixedPath = path.join(__dirname, 'public', 'index_fixed.html');
+      const indexPath = path.join(__dirname, 'public', 'index.html');
+      const servePath = fs.existsSync(fixedPath) ? fixedPath : indexPath;
+      return res.sendFile(servePath);
+    } catch (e) {
+      console.error('[HTTP] Error while serving UI:', e.message);
+      // fall through to 500
+      return res.status(500).send('Failed to serve UI');
     }
-  } catch (e) {
-    console.error('[HTTP] Error while serving UI:', e.message);
-    // ignore and fall through to JSON response
   }
+
+  // API service: always return API JSON at root
   console.log('[HTTP] Serving API JSON at root');
   return res.json({ message: 'Smart Device REST API' });
 });
 
-// Serve static assets (JS/CSS) from /public
-app.use(express.static('public'));
+// Serve static assets (JS/CSS) from /public only when SERVICE_TYPE=ui
+if (SERVICE_TYPE === 'ui') {
+  console.log('[START] Enabling static asset serving from /public');
+  app.use(express.static('public'));
+} else {
+  console.log('[START] Static asset serving disabled (SERVICE_TYPE != ui)');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JWT Configuration
@@ -91,6 +108,31 @@ async function testDatabase() {
 }
 
 setTimeout(() => testDatabase(), 1000);
+
+// Ensure provisioning table exists (create migration)
+async function ensureProvisionTable() {
+  try {
+    const conn = await dbPool.getConnection();
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS provision_sessions (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,
+        claimed_device_id VARCHAR(64) DEFAULT NULL,
+        status ENUM('active','claimed','expired') DEFAULT 'active',
+        INDEX (status),
+        INDEX (user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    conn.release();
+    console.log('✓ provision_sessions table ready');
+  } catch (err) {
+    console.error('Failed to ensure provision_sessions table:', err.message);
+  }
+}
+
+setTimeout(() => ensureProvisionTable(), 1500);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MQTT Configuration
@@ -309,7 +351,7 @@ app.post('/devices/register', async (req, res) => {
     const claim_code = generateClaimCode();
     await conn.query(
       'INSERT INTO devices (id, user_id, name, type, claim_code) VALUES (?, NULL, ?, ?, ?)',
-      [device_id, name || device_id, 'smart_device', claim_code]
+      [device_id, name || device_id, 'penlightwaver', claim_code]
     );
     conn.release();
 
@@ -358,9 +400,12 @@ app.post('/auth/signup', async (req, res) => {
 
     console.log(`[AUTH] New user registered: ${email}`);
 
+    // result.insertId may be a BigInt depending on driver — convert to Number for JSON
+    const newUserId = Number(result.insertId);
+
     res.status(201).json({
       message: 'Account created successfully',
-      user_id: result.insertId,
+      user_id: newUserId,
       email: email
     });
   } catch (err) {
@@ -394,8 +439,11 @@ app.post('/auth/login', async (req, res) => {
     }
 
     // Generate JWT token (valid for 7 days)
+    // Normalize user id to Number to avoid BigInt serialization errors
+    const numericUserId = Number(user.id);
+
     const token = jwt.sign(
-      { user_id: user.id, email: user.email },
+      { user_id: numericUserId, email: user.email },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -405,7 +453,7 @@ app.post('/auth/login', async (req, res) => {
     res.json({
       message: 'Login successful',
       token: token,
-      user_id: user.id,
+      user_id: numericUserId,
       email: user.email
     });
   } catch (err) {
@@ -455,6 +503,113 @@ app.post('/devices/claim', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provisioning short-window flow
+//  - POST /provision/start      (auth) creates a one-time session with TTL (default 10s)
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /provision/start — create a global, single active provisioning session
+app.post('/provision/start', authMiddleware, async (req, res) => {
+  const user_id = req.user.user_id;
+  const ttlSeconds = (req.body && req.body.ttl) ? parseInt(req.body.ttl) : 10; // default 10s
+
+  try {
+    const conn = await dbPool.getConnection();
+
+    // Expire old sessions
+    await conn.query("UPDATE provision_sessions SET status = 'expired' WHERE status = 'active' AND expires_at <= NOW()");
+
+    // Ensure there is no other active session
+    const active = await conn.query("SELECT * FROM provision_sessions WHERE status = 'active' LIMIT 1");
+    if (active.length > 0) {
+      conn.release();
+      return res.status(409).json({ error: 'Another provisioning session is already active. Try again later.' });
+    }
+
+    const sessionId = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+    const expiresSql = expiresAt.toISOString().slice(0,19).replace('T',' ');
+
+    await conn.query('INSERT INTO provision_sessions (id, user_id, expires_at) VALUES (?, ?, ?)', [sessionId, user_id, expiresSql]);
+    conn.release();
+
+    console.log(`[PROVISION] User ${user_id} started session ${sessionId} (TTL ${ttlSeconds}s)`);
+    return res.json({ session_id: sessionId, expires_at: expiresSql, ttl_seconds: ttlSeconds });
+  } catch (err) {
+    console.error('[PROVISION] Start error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /provision/announce — called by device to announce presence during provisioning window
+// body: { device_id: "device-..", session_id?: "..." }
+// If session_id is omitted, server will use the single active session (if any).
+app.post('/provision/announce', async (req, res) => {
+  const { device_id } = req.body;
+  let { session_id } = req.body || {};
+  if (!device_id) return res.status(400).json({ error: 'device_id is required' });
+
+  try {
+    const conn = await dbPool.getConnection();
+
+    let session;
+    if (session_id) {
+      const sessions = await conn.query('SELECT * FROM provision_sessions WHERE id = ? AND status = "active" LIMIT 1', [session_id]);
+      if (!sessions.length) {
+        conn.release();
+        return res.status(404).json({ error: 'Provisioning session not found or not active' });
+      }
+      session = sessions[0];
+    } else {
+      // No session_id provided — attempt to find any active session
+      const active = await conn.query('SELECT * FROM provision_sessions WHERE status = "active" AND expires_at > NOW() LIMIT 1');
+      if (!active.length) {
+        conn.release();
+        return res.status(404).json({ error: 'No active provisioning session' });
+      }
+      session = active[0];
+      session_id = session.id;
+    }
+
+    // Check expiry
+    const now = new Date();
+    const expires = new Date(session.expires_at);
+    if (expires < now) {
+      // mark expired
+      await conn.query("UPDATE provision_sessions SET status = 'expired' WHERE id = ?", [session_id]);
+      conn.release();
+      return res.status(410).json({ error: 'Provisioning session expired' });
+    }
+
+    // Verify device exists
+    const devices = await conn.query('SELECT * FROM devices WHERE id = ?', [device_id]);
+    if (!devices.length) {
+      conn.release();
+      return res.status(404).json({ error: 'Device not found (must be registered)' });
+    }
+
+    const device = devices[0];
+    if (device.user_id) {
+      conn.release();
+      return res.status(409).json({ error: 'Device already claimed' });
+    }
+
+    // Claim device for the session owner
+    await conn.query('UPDATE devices SET user_id = ? WHERE id = ?', [session.user_id, device_id]);
+    await conn.query("UPDATE provision_sessions SET claimed_device_id = ?, status = 'claimed' WHERE id = ?", [device_id, session_id]);
+    conn.release();
+
+    console.log(`[PROVISION] Device ${device_id} claimed by user ${session.user_id} via session ${session_id}`);
+    return res.json({ success: true, device_id, user_id: session.user_id, session_id });
+  } catch (err) {
+    console.error('[PROVISION] Announce error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -796,6 +951,8 @@ app.listen(PORT, '0.0.0.0', () => {
  console.log(`  POST   /devices/:deviceId/motor/stop          (requires auth)`);
  console.log(`  GET    /devices/:deviceId/motor/status        (requires auth)`);
  console.log(`  POST   /devices/claim                         (body: {claim_code}, requires auth)`);
+    console.log(`  POST   /provision/start                      (start short provisioning window, requires auth)`);
+    console.log(`  POST   /provision/announce                   (device announces during window: {device_id, session_id})`);
  console.log(`\n  Firmware Updates:`);
  console.log(`  GET    /firmware/penlightwaver/version`);
  console.log(`  GET    /firmware/penlightwaver/latest.bin`);
