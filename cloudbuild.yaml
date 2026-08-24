@@ -28,7 +28,7 @@ steps:
   # never the value. Syntax: ENV_VAR_NAME=SECRET_MANAGER_SECRET_NAME:version
   # Non-secret config (URLs, intervals) are set once via:
   #   gcloud run services update tauchoapis --region asia-northeast1 --update-env-vars KEY=VALUE
-  # and are intentionally not listed here so they survive deploys without being reset.
+  # and are intentionally not listed here so they survive deploys without being reset..
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: "gcloud"
     args:
