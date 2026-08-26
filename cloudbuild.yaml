@@ -1,0 +1,41 @@
+steps:
+  - name: "bash"
+    script: "date -u +%Y-%m-%dT%H:%M:%SZ > /workspace/build_time.txt"
+
+  - name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        BUILD_TIME=$(cat /workspace/build_time.txt)
+        docker build \
+          --build-arg SHORT_SHA=$SHORT_SHA \
+          --build-arg BUILD_TIME=$$BUILD_TIME \
+          -t gcr.io/unicorn-extermination/smartdevice-api:$COMMIT_SHA \
+          -t gcr.io/unicorn-extermination/smartdevice-api:latest \
+          .
+
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "--all-tags", "gcr.io/unicorn-extermination/smartdevice-api"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: "gcloud"
+    args:
+      - "run"
+      - "deploy"
+      - "unicorndevicebroker-api"
+      - "--image"
+      - "gcr.io/unicorn-extermination/smartdevice-api:latest"
+      - "--region"
+      - "asia-northeast1"
+      - "--platform"
+      - "managed"
+      - "--memory"
+      - "512Mi"
+      - "--min-instances"
+      - "1"
+      - "--allow-unauthenticated"
+
+images:
+  - "gcr.io/unicorn-extermination/smartdevice-api:$COMMIT_SHA"
+  - "gcr.io/unicorn-extermination/smartdevice-api:latest"
