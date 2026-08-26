@@ -148,7 +148,7 @@ sudo systemctl start mosquitto
 
 ---
 
-## Next Steps
+## Next Steps.
 
 - [ ] Test locally with Postman
 - [ ] Deploy to Google Cloud (see DEPLOYMENT.md)
