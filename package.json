@@ -1,7 +1,7 @@
 {
-  "name": "smart-device-mqtt-bridge",
+  "name": "smartdevice-api",
   "version": "1.0.0",
-  "description": "REST to MQTT bridge for smart device control",
+  "description": "Smart Device REST API + MQTT bridge",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

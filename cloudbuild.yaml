@@ -1,9 +1,7 @@
 steps:
-  # Step 0: Capture build timestamp into /workspace/build_time.txt
   - name: "bash"
     script: "date -u +%Y-%m-%dT%H:%M:%SZ > /workspace/build_time.txt"
 
-  # Step 1: Build Docker image — tagged both with commit SHA (immutable) and :latest
   - name: "gcr.io/cloud-builders/docker"
     entrypoint: "bash"
     args:
@@ -13,26 +11,21 @@ steps:
         docker build \
           --build-arg SHORT_SHA=$SHORT_SHA \
           --build-arg BUILD_TIME=$$BUILD_TIME \
-          -t gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:$COMMIT_SHA \
-          -t gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:latest \
+          -t gcr.io/unicorn-extermination/smartdevice-api:$COMMIT_SHA \
+          -t gcr.io/unicorn-extermination/smartdevice-api:latest \
           .
 
-  # Step 2: Push both tags to Container Registry
   - name: "gcr.io/cloud-builders/docker"
-    args:
-      - "push"
-      - "--all-tags"
-      - "gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker"
+    args: ["push", "--all-tags", "gcr.io/unicorn-extermination/smartdevice-api"]
 
-  # Step 3: Deploy to Cloud Run using :latest so it always picks up the newest image
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: "gcloud"
     args:
       - "run"
       - "deploy"
-      - "UnicornDeviceBroker"
+      - "unicorndevicebroker-api"
       - "--image"
-      - "gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:latest"
+      - "gcr.io/unicorn-extermination/smartdevice-api:latest"
       - "--region"
       - "asia-northeast1"
       - "--platform"
@@ -43,12 +36,6 @@ steps:
       - "1"
       - "--allow-unauthenticated"
 
-# Images to push to Container Registry
 images:
-  - "gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:$COMMIT_SHA"
-  - "gcr.io/unicorn-extermination/github.com/ChiefOfUnicornExtermination/UnicornDeviceBroker:latest"
-
-# Substitutions (define these in Cloud Build trigger settings if needed)
-substitutions:
-  _SERVICE: UnicornDeviceBroker
-  _REGION: asia-northeast1
+  - "gcr.io/unicorn-extermination/smartdevice-api:$COMMIT_SHA"
+  - "gcr.io/unicorn-extermination/smartdevice-api:latest"
