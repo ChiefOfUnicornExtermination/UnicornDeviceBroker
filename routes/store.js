@@ -26,7 +26,7 @@ router.get('/products', authMiddleware, async (req, res) => {
         image_url: product.image_url,
         is_new: product.is_new,
         featured_order: product.featured_order,
-        stock_quantity: stock_quantity
+        stock_quantity: product.stock_quantity
       };
     });
     res.json({ products: result });
@@ -52,7 +52,7 @@ router.get('/products/:product_id', authMiddleware, async (req, res) => {
         image_url: product.image_url,
         is_new: product.is_new,
         featured_order: product.featured_order,
-        stock_quantity: stock_quantity
+        stock_quantity: product.stock_quantity
       };
     })[0];
     res.json({ product: result });
